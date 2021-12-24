@@ -1,6 +1,11 @@
+BUILD      = build
+LIBS_DIR   = lib
 TARGET     = main.c
-LIBS       = $(wildcard lib/*.c)
+LIBS       = $(wildcard $(LIBS_DIR)/*.c)
 OBJS       = $(LIBS:.c=.o)
+OBJS       += $(TARGET:.c=.o)
+ASMS       = $(OBJS:.o=.asm)
+FLAGS      =
 F_CPU      = 16000000UL
 PORT       = COM6
 DEVICE     = atmega2560
@@ -8,20 +13,34 @@ PROGRAMMER = wiring
 BAUD       = 115200
 COMPILE    = avr-gcc -Wall -Os -mmcu=$(DEVICE) -D F_CPU=$(F_CPU) -std=gnu99
 
+.PHONY: clean upload
+
 default: compile upload
 
-%.o: %.c
-	$(COMPILE) -c $< -o $@
+%.s: %.c
+	$(COMPILE) -S -c $< -o $@
 
-compile: $(OBJS)
-	$(COMPILE) -o $(TARGET).elf $(OBJS)
-	avr-objcopy -j .text -j .data -O ihex $(TARGET).elf $(TARGET).hex
-	avr-size --format=avr --mcu=$(DEVICE) $(TARGET).elf
+%.o: %.c
+	$(COMPILE) $(FLAGS) -c $< -o $@
+
+compile: clean-all $(OBJS)
+	$(COMPILE) -o $(BUILD).elf $(OBJS)
+	avr-objcopy -j .text -j .data -O ihex $(BUILD).elf $(BUILD).hex
+	avr-size --format=avr --mcu=$(DEVICE) $(BUILD).elf
+
+asm: clean-all $(ASMS)
 
 upload:
-	avrdude -v -D -p $(DEVICE) -c $(PROGRAMMER) -P $(PORT) -b $(BAUD) -Uflash:w:$(TARGET).hex:i
+	avrdude -v -D -p $(DEVICE) -c $(PROGRAMMER) -P $(PORT) -b $(BAUD) -Uflash:w:$(BUILD).hex:i
 
 clean:
-	rm $(TARGET).o
-	rm $(TARGET).elf
-	rm $(TARGET).hex
+	-rm *.o
+	-rm *.elf
+	-rm *.hex
+	-rm *.s
+	-rm *.asm
+
+clean-all: clean
+	-rm $(LIBS_DIR)/*.o
+	-rm $(LIBS_DIR)/*.s
+	-rm $(LIBS_DIR)/*.asm
