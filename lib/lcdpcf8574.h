@@ -157,6 +157,13 @@ extern void lcd_putc(char c);
 extern void lcd_puts(const char *s);
 
 /**
+ @brief    Display string without auto linefeed
+ @param    s string to be displayed
+ @return   none
+*/
+extern void lcd_puti(int i);
+
+/**
  @brief    Display string from program memory without auto linefeed
  @param    s string from program memory be be displayed
  @return   none

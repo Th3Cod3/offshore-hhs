@@ -424,6 +424,25 @@ void lcd_puts(const char *s)
 } /* lcd_puts */
 
 /*************************************************************************
+Display Cast interger to string without auto linefeed
+Input:    intenger to be displayed
+Returns:  none
+*************************************************************************/
+void lcd_puti(int i)
+/* print string on lcd (no auto linefeed) */
+{
+    register char c;
+
+    while (i > 0)
+    {
+        c = (i % 10) + '0';
+        i /= 10;
+        lcd_putc(c);
+    }
+
+} /* lcd_puti */
+
+/*************************************************************************
 Display string from program memory without auto linefeed
 Input:     string from program memory be be displayed
 Returns:   none
