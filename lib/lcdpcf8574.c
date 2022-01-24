@@ -50,6 +50,68 @@ static inline void _delayFourCycles(unsigned int __count)
             : "=w"(__count)
             : "0"(__count));
 }
+// This function swaps values pointed by xp and yp
+void swap(char *xp, char *yp)
+{
+    int temp = *xp;
+    *xp = *yp;
+    *yp = temp;
+}
+
+/* A utility function to reverse a string */
+void reverse(char str[], int length)
+{
+    int start = 0;
+    int end = length - 1;
+    while (start < end)
+    {
+        swap(&(*(str + start)), &(*(str + end)));
+        start++;
+        end--;
+    }
+}
+
+// Implementation of itoa()
+char *itoa(int num, char *str, int base)
+{
+    int i = 0;
+    char isNegative = 0;
+
+    /* Handle 0 explicitly, otherwise empty string is printed for 0 */
+    if (num == 0)
+    {
+        str[i++] = '0';
+        str[i] = '\0';
+        return str;
+    }
+
+    // In standard itoa(), negative numbers are handled only with
+    // base 10. Otherwise numbers are considered unsigned.
+    if (num < 0 && base == 10)
+    {
+        isNegative = 1;
+        num = -num;
+    }
+
+    // Process individual digits
+    while (num != 0)
+    {
+        int rem = num % base;
+        str[i++] = (rem > 9) ? (rem - 10) + 'a' : rem + '0';
+        num = num / base;
+    }
+
+    // If number is negative, append '-'
+    if (isNegative)
+        str[i++] = '-';
+
+    str[i] = '\0'; // Append string terminator
+
+    // Reverse the string
+    reverse(str, i);
+
+    return str;
+}
 
 /*************************************************************************
 delay for a minimum of <us> microseconds
@@ -432,13 +494,10 @@ void lcd_puti(int i)
 /* print string on lcd (no auto linefeed) */
 {
     register char c;
+    char s[LCD_DISP_LENGTH];
+    itoa(i, s, 10);
 
-    while (i > 0)
-    {
-        c = (i % 10) + '0';
-        i /= 10;
-        lcd_putc(c);
-    }
+    lcd_puts(s);
 
 } /* lcd_puti */
 
