@@ -18,14 +18,14 @@ void dcmotor_instruction(DcMotor motor, char instruction)
     switch (instruction)
     {
     case DCMOTOR_FORWARD:
-        if (!(*motor.pinLimitA & _BV(motor.limitA)))
+        if (dcmotor_end_limit(motor))
             return dcmotor_instruction(motor, DCMOTOR_STOP);
         *motor.portA |= _BV(motor.pinA);
         *motor.portB &= ~_BV(motor.pinB);
         return;
 
     case DCMOTOR_BACKWARD:
-        if (!(*motor.pinLimitB & _BV(motor.limitB)))
+        if (dcmotor_start_limit(motor))
             return dcmotor_instruction(motor, DCMOTOR_STOP);
         *motor.portA &= ~_BV(motor.pinA);
         *motor.portB |= _BV(motor.pinB);
@@ -50,4 +50,12 @@ void dcmotor_init(DcMotor motor)
     *motor.portLimitA |= _BV(motor.limitA);   // output
     *motor.portLimitB |= _BV(motor.limitB);   // output
     dcmotor_instruction(motor, DCMOTOR_STOP);
+}
+
+uint8_t dcmotor_end_limit(DcMotor motor) {
+    return !(*motor.pinLimitA & _BV(motor.limitA));
+}
+
+uint8_t dcmotor_start_limit(DcMotor motor) {
+    return !(*motor.pinLimitB & _BV(motor.limitB));
 }

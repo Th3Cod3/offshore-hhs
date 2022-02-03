@@ -493,7 +493,6 @@ Returns:  none
 void lcd_puti(int i)
 /* print string on lcd (no auto linefeed) */
 {
-    register char c;
     char s[LCD_DISP_LENGTH];
     itoa(i, s, 10);
 

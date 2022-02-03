@@ -24,6 +24,8 @@ typedef struct
 } DcMotor;
 
 extern void dcmotor_instruction(DcMotor motor, char instruction);
+extern uint8_t dcmotor_start_limit(DcMotor motor);
+extern uint8_t dcmotor_end_limit(DcMotor motor);
 extern void dcmotor_init(DcMotor motor);
 
 #endif

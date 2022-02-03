@@ -1,18 +1,9 @@
 #include <avr/io.h>
+#include <avr/interrupt.h>
 #include "lib/lcdpcf8574.h"
 #include "lib/dcmotor.h"
-
-#ifdef DEBUG_EN
-#include <util/delay.h>
-#define DEBUG_PIN PORTB7
-#define DEBUG_SIGNAL(delay)  \
-    DDRB |= _BV(DEBUG_PIN);  \
-    PORTB ^= _BV(DEBUG_PIN); \
-    _delay_ms(delay);        \
-    PORTB ^= _BV(DEBUG_PIN);
-#else
-#define DEBUG_SIGNAL(delay)
-#endif
+#include "lib/stepmotor.h"
+#include "lib/debug.h"
 
 #define LCD_HIGH 0
 #define LCD_LOW 1
@@ -26,6 +17,11 @@
 #define X_ENCODER_A PC6
 #define X_ENCODER_B PC7
 
+#define Z_STEPPER_DIR PL2
+#define Z_STEPPER_STEP PL3
+#define GRIP_STEPPER_DIR PL1
+#define GRIP_STEPPER_STEP PL0
+
 #define ENCODER_STATE_UNKNOWN 100
 #define ENCODER_STATE_NONE 0
 #define ENCODER_STATE_A 1
@@ -37,40 +33,59 @@
 
 #define PROJECT_OPTION_NONE 0
 #define PROJECT_OPTION_DRIVE 1
-#define PROJECT_OPTION_SETTINGS 2
+#define PROJECT_OPTION_CONFIG 2
 #define PROJECT_OPTION_INFO 3
 #define PROJECT_OPTION_DRIVE_MANUAL 11
 #define PROJECT_OPTION_DRIVE_GRID 12
-#define PROJECT_OPTION_SETTINGS_CALIBRATION 21
-#define PROJECT_OPTION_SETTINGS_BOX 22
+#define PROJECT_OPTION_CONFIG_CALIBRATION 21
+#define PROJECT_OPTION_CONFIG_BOX 22
 
 #define LCD_REFESH 1
 #define LCD_NO_REFESH 2
 
-// {"Besturing", "Instellingen", "Projectinfo"},
-//     {"Handmatig", "Raster", "Terug"},
-//         {"x=", "z=", "y=", "Terug"},
-//         {"Raster=", "Starten", "Terug"},
 //             {"Kraan naar A0"},
-//     {"Calibratie", "Doos(mm)", "Terug"},
+//     {"Calibratie", "Doos", "Terug"},
 //         {"Verplaats x->", "Verplaats y->", "Verplaats z->"},
 //         {"l=", "h=", "d=", "Terug"},
-//     {"terug", "Projectinfo", "Naam project:", "Project Onshore", "Gemaakt door:", "Projectgroep B1", "Leden:", "-Roy -Hicham", "-Ivan -Yefri", "-Sebastiaan", "terug"}
 
 uint8_t position[] = {0, 0, 0};
 uint8_t moveToPosition[] = {0, 0, 0};
 uint8_t boxDimension[] = {10, 10, 10};
 uint8_t boxMargin[] = {10, 10, 10};
-uint8_t grid[] = {'A', 0};
+uint8_t grid[] = {0, 0};
+uint8_t tolerance = 2;
+uint8_t emergency = 0;
+
+ISR(INT4_vect)
+{
+    emergency = 1;
+}
+
+ISR(TIMER0_OVF_vect)
+{
+    stepmotor_disable_timer();
+}
+
+ISR(TIMER0_COMPA_vect)
+{
+    if (!emergency)
+    {
+        PORTL |= _BV(Z_STEPPER_STEP);
+        PORTL |= _BV(GRIP_STEPPER_STEP);
+        readZSteps();
+    }
+}
 
 char menuText[][LCD_DISP_LENGTH + 1] = {"Besturing", "Instellingen", "Projectinfo"};
 char projectInfo[][LCD_DISP_LENGTH + 1] = {"Druk voor terug", "Projectinfo", "Naam project:", "Project Onshore", "Gemaakt door:", "Projectgroep B1", "Leden:", "-Roy -Hicham", "-Ivan -Yefri", "-Sebastiaan", "Druk voor terug"};
 char projectDrive[][LCD_DISP_LENGTH + 1] = {"Handmatig", "Raster", "Terug"};
 char projectDriveManual[][LCD_DISP_LENGTH + 1] = {"x=", "y=", "z=", "Terug"};
 char projectDriveGrid[][LCD_DISP_LENGTH + 1] = {"Raster=", "Starten", "Terug"};
+char projectConfig[][LCD_DISP_LENGTH + 1] = {"Calibratie", "Doos", "Terug"};
 
 const uint8_t optionsAmount = sizeof(menuText) / (LCD_DISP_LENGTH + 1);
 const uint8_t optionsInfoAmount = sizeof(projectInfo) / (LCD_DISP_LENGTH + 1);
+const uint8_t optionsConfigAmount = sizeof(projectConfig) / (LCD_DISP_LENGTH + 1);
 const uint8_t optionsDriveAmount = sizeof(projectDrive) / (LCD_DISP_LENGTH + 1);
 const uint8_t optionsDriveManualAmount = sizeof(projectDriveManual) / (LCD_DISP_LENGTH + 1);
 const uint8_t optionsDriveGridAmount = sizeof(projectDriveGrid) / (LCD_DISP_LENGTH + 1);
@@ -85,7 +100,7 @@ void readScreenEncoder(uint8_t *lcdEncoderState)
 
     if (lcdEncoderButton)
     {
-        _delay_us(500); // prevent debounce
+        _delay_ms(1); // prevent debounce
         *lcdEncoderState = ENCODER_STATE_BUTTON;
     }
     else if (*lcdEncoderState != ENCODER_STATE_NONE && !lcdEncoderA && !lcdEncoderB)
@@ -94,7 +109,6 @@ void readScreenEncoder(uint8_t *lcdEncoderState)
     }
     else if (*lcdEncoderState == ENCODER_STATE_NONE && lcdEncoderA && lcdEncoderB)
     {
-        DEBUG_SIGNAL(1)
         return;
     }
     else if (lcdEncoderA && *lcdEncoderState == ENCODER_STATE_NONE)
@@ -118,6 +132,7 @@ void readScreenEncoder(uint8_t *lcdEncoderState)
 void readXEncoder()
 {
     static uint8_t xEncoderState = ENCODER_STATE_NONE;
+    static int8_t toleranceCounter = 0;
     uint8_t xEncoderA = (PINC & _BV(X_ENCODER_A));
     uint8_t xEncoderB = (PINC & _BV(X_ENCODER_B));
 
@@ -139,14 +154,22 @@ void readXEncoder()
     }
     else if (xEncoderB && xEncoderState == ENCODER_STATE_A)
     {
-        if (xEncoderState != ENCODER_STATE_LEFT)
+        if (xEncoderState != ENCODER_STATE_LEFT && toleranceCounter == tolerance)
+        {
             position[0]--;
+            toleranceCounter = 0;
+        }
+        toleranceCounter++;
         xEncoderState = ENCODER_STATE_LEFT;
     }
     else if (xEncoderA && xEncoderState == ENCODER_STATE_B)
     {
-        if (xEncoderState != ENCODER_STATE_RIGHT)
+        if (xEncoderState != ENCODER_STATE_RIGHT && toleranceCounter == -tolerance)
+        {
             position[0]++;
+            toleranceCounter = 0;
+        }
+        toleranceCounter--;
         xEncoderState = ENCODER_STATE_RIGHT;
     }
 }
@@ -154,6 +177,7 @@ void readXEncoder()
 void readYEncoder()
 {
     static uint8_t yEncoderState = ENCODER_STATE_NONE;
+    static int8_t toleranceCounter = 0;
     uint8_t yEncoderA = (PINC & _BV(Y_ENCODER_A));
     uint8_t yEncoderB = (PINC & _BV(Y_ENCODER_B));
 
@@ -175,15 +199,35 @@ void readYEncoder()
     }
     else if (yEncoderB && yEncoderState == ENCODER_STATE_A)
     {
-        if (yEncoderState != ENCODER_STATE_LEFT)
+        if (yEncoderState != ENCODER_STATE_LEFT && toleranceCounter == tolerance)
+        {
             position[1]--;
+            toleranceCounter = 0;
+        }
+        toleranceCounter++;
         yEncoderState = ENCODER_STATE_LEFT;
     }
     else if (yEncoderA && yEncoderState == ENCODER_STATE_B)
     {
-        if (yEncoderState != ENCODER_STATE_RIGHT)
+        if (yEncoderState != ENCODER_STATE_RIGHT && toleranceCounter == -tolerance)
+        {
             position[1]++;
+            toleranceCounter = 0;
+        }
+        toleranceCounter--;
         yEncoderState = ENCODER_STATE_RIGHT;
+    }
+}
+
+void readZSteps()
+{
+    if (PORTL & _BV(Z_STEPPER_STEP))
+    {
+        position[2]--;
+    }
+    else
+    {
+        position[2]++;
     }
 }
 
@@ -192,7 +236,6 @@ uint8_t moveOptionSelector(uint8_t *optionSelector, uint8_t lcdEncoderState, uin
     // -1 of the index and -1 complement = -2
     if (lcdEncoderState == ENCODER_STATE_LEFT && (*optionSelector < totalOptions - optionsOnScreen || complement < optionsOnScreen - 1))
     {
-        DEBUG_SIGNAL(10);
         if (complement < optionsOnScreen - 1)
         {
             complement++;
@@ -231,7 +274,8 @@ void chooseOption(uint8_t *optionSelector, uint8_t *projectOption)
         case PROJECT_OPTION_DRIVE - 1:
             *projectOption = PROJECT_OPTION_DRIVE;
             break;
-        case PROJECT_OPTION_SETTINGS - 1:
+        case PROJECT_OPTION_CONFIG - 1:
+            *projectOption = PROJECT_OPTION_CONFIG;
             break;
         case PROJECT_OPTION_INFO - 1:
             *projectOption = PROJECT_OPTION_INFO;
@@ -257,12 +301,27 @@ void chooseOption(uint8_t *optionSelector, uint8_t *projectOption)
     {
         *projectOption = PROJECT_OPTION_NONE;
     }
+    else if (*projectOption == PROJECT_OPTION_CONFIG)
+    {
+        switch ((*optionSelector) + complement)
+        {
+        case PROJECT_OPTION_CONFIG_CALIBRATION - 21:
+            *projectOption = PROJECT_OPTION_CONFIG_CALIBRATION;
+            break;
+        case PROJECT_OPTION_CONFIG_BOX - 21:
+            // *projectOption = PROJECT_OPTION_CONFIG_BOX;
+            break;
+        default:
+            *projectOption = PROJECT_OPTION_NONE;
+            break;
+        }
+    }
     else if (*projectOption == PROJECT_OPTION_DRIVE_MANUAL || *projectOption == PROJECT_OPTION_DRIVE_GRID)
     {
     }
     else
     {
-        DEBUG_SIGNAL(1000)
+        DEBUG_SIGNAL(10)
     }
 
     if (prevProjectOption != *projectOption)
@@ -272,7 +331,7 @@ void chooseOption(uint8_t *optionSelector, uint8_t *projectOption)
     }
 }
 
-void changeOption(uint8_t *projectOption, uint8_t *optionSelector, uint8_t lcdEncoderState)
+void changeOption(uint8_t *projectOption, uint8_t *optionSelector, uint8_t lcdEncoderState, DcMotor motorX, DcMotor motorY)
 {
     uint8_t optionsOnScreen = 2;
     if (lcdEncoderState == ENCODER_STATE_BUTTON)
@@ -299,6 +358,33 @@ void changeOption(uint8_t *projectOption, uint8_t *optionSelector, uint8_t lcdEn
             complement - i ? lcd_putc('-') : lcd_putc('>');
             lcd_puts(projectDrive[*optionSelector + i]);
         }
+    }
+    else if (*projectOption == PROJECT_OPTION_CONFIG)
+    {
+        moveOptionSelector(optionSelector, lcdEncoderState, optionsConfigAmount, optionsOnScreen);
+        for (uint8_t i = 0; i < 2; i++)
+        {
+            !i ? lcd_clrscr() : lcd_gotoxy(0, 1);
+            complement - i ? lcd_putc('-') : lcd_putc('>');
+            lcd_puts(projectConfig[*optionSelector + i]);
+        }
+    }
+    else if (*projectOption == PROJECT_OPTION_CONFIG_CALIBRATION)
+    {
+        lcd_clrscr();
+        lcd_puts("Bezig...");
+        while (!dcmotor_start_limit(motorX) || !dcmotor_start_limit(motorY))
+        {
+            dcmotor_instruction(motorX, DCMOTOR_BACKWARD);
+            dcmotor_instruction(motorY, DCMOTOR_BACKWARD);
+        }
+        position[0] = 0;
+        position[1] = 0;
+        moveToPosition[0] = 0;
+        moveToPosition[1] = 0;
+        lcd_clrscr();
+        lcd_puts("Start positie");
+        *projectOption = PROJECT_OPTION_CONFIG;
     }
     else if (*projectOption == PROJECT_OPTION_DRIVE_MANUAL)
     {
@@ -353,18 +439,20 @@ void changeOption(uint8_t *projectOption, uint8_t *optionSelector, uint8_t lcdEn
         }
         else if (lcdEncoderState == ENCODER_STATE_LEFT)
         {
-            moveToPosition[*optionSelector + complement]++;
+            grid[*optionSelector + complement]++;
         }
         else if (lcdEncoderState == ENCODER_STATE_RIGHT)
         {
-            moveToPosition[*optionSelector + complement]--;
+            grid[*optionSelector + complement]--;
         }
+
         for (uint8_t i = 0; i < optionsOnScreen; i++)
         {
             !i ? lcd_clrscr() : lcd_gotoxy(!(i % 2) ? LCD_DISP_LENGTH / 2 : 0, 1);
             complement - i ? lcd_putc('-') : lcd_putc('>');
             lcd_puts(projectDriveGrid[*optionSelector + i]);
-            if (i == 0){
+            if (i == 0)
+            {
                 lcd_putc(' ');
                 lcd_putc(grid[0] + 'A');
                 lcd_puti(grid[1]);
@@ -389,7 +477,7 @@ uint8_t validateLcdState(uint8_t lcdEncoderState, uint8_t lcdEncoderPrevState)
     return hasActionsState && !sameAsPrevState;
 }
 
-void moveMotors(DcMotor motorX, DcMotor motorY)
+void moveMotors(DcMotor motorX, DcMotor motorY, StepMotor motorZ)
 {
     readXEncoder();
     readYEncoder();
@@ -419,6 +507,17 @@ void moveMotors(DcMotor motorX, DcMotor motorY)
                     dcmotor_instruction(motorY, DCMOTOR_BACKWARD);
                 }
             }
+            else if (i == 2)
+            {
+                if (position[i] < moveToPosition[i])
+                {
+                    stepmotor_instruction(motorZ, STEPMOTOR_FORWARD);
+                }
+                else
+                {
+                    stepmotor_instruction(motorZ, STEPMOTOR_BACKWARD);
+                }
+            }
         }
         else
         {
@@ -430,26 +529,72 @@ void moveMotors(DcMotor motorX, DcMotor motorY)
             {
                 dcmotor_instruction(motorY, DCMOTOR_STOP);
             }
+            else if (i == 2)
+            {
+                stepmotor_instruction(motorZ, STEPMOTOR_STOP);
+            }
         }
     }
+}
+
+void initEmergency(DcMotor motorX, DcMotor motorY, StepMotor motorZ)
+{
+    lcd_clrscr();
+    lcd_puts("NOODSITUATIE!!!");
+    dcmotor_instruction(motorX, DCMOTOR_STOP);
+    dcmotor_instruction(motorY, DCMOTOR_STOP);
+    stepmotor_instruction(motorZ, DCMOTOR_STOP);
 }
 
 int main(void)
 {
     lcd_init(LCD_DISP_ON);
     lcd_led(LCD_HIGH);
-    DDRC &= ~(_BV(LCD_ENCODER_A) | _BV(LCD_ENCODER_B) | _BV(LCD_ENCODER_BUTTON));
-    DDRC &= ~(_BV(X_ENCODER_A) | _BV(X_ENCODER_B));
-    DDRC &= ~(_BV(Y_ENCODER_A) | _BV(Y_ENCODER_B));
-    PORTC |= _BV(Y_ENCODER_A) | _BV(Y_ENCODER_B);
-    PORTC |= _BV(X_ENCODER_A) | _BV(X_ENCODER_B);
-    PORTC |= _BV(LCD_ENCODER_A) | _BV(LCD_ENCODER_B) | _BV(LCD_ENCODER_BUTTON);
+    DDRC &= ~(_BV(LCD_ENCODER_A) | _BV(LCD_ENCODER_B) | _BV(LCD_ENCODER_BUTTON)); // inputs
+    DDRC &= ~(_BV(X_ENCODER_A) | _BV(X_ENCODER_B));                               // input
+    DDRC &= ~(_BV(Y_ENCODER_A) | _BV(Y_ENCODER_B));                               // input
+    PORTC |= _BV(Y_ENCODER_A) | _BV(Y_ENCODER_B);                                 // pull-up
+    PORTC |= _BV(X_ENCODER_A) | _BV(X_ENCODER_B);                                 // pull-up
+    PORTC |= _BV(LCD_ENCODER_A) | _BV(LCD_ENCODER_B) | _BV(LCD_ENCODER_BUTTON);   // pull-up
+
+    // external interrupt
+    DDRE &= ~_BV(PE4); // input
+    PORTE |= _BV(PE4); // pull-up
+    EICRB |= _BV(ISC41);
+    EIMSK |= _BV(INT4);
+    sei();
 
     uint8_t lcdEncoderState = ENCODER_STATE_NONE;
     uint8_t projectOption = PROJECT_OPTION_NONE;
+    // projectOption = PROJECT_OPTION_DRIVE_GRID;
     uint8_t lcdEncoderPrevState = ENCODER_STATE_UNKNOWN;
     uint8_t optionSelector = 0;
+    uint8_t emergencyPrev = 0;
     DcMotor motorX, motorY;
+    StepMotor motorZ;
+
+    motorZ.ddrMoveDir = &DDRL;
+    motorZ.portMoveDir = &PORTL;
+    motorZ.pinMoveDir = Z_STEPPER_DIR;
+    motorZ.ddrMoveStep = &DDRL;
+    motorZ.portMoveStep = &PORTL;
+    motorZ.pinMoveStep = Z_STEPPER_STEP;
+
+    motorZ.ddrGrapDir = &DDRL;
+    motorZ.portGrapDir = &PORTL;
+    motorZ.pinGrapDir = GRIP_STEPPER_DIR;
+    motorZ.ddrGrapStep = &DDRL;
+    motorZ.portGrapStep = &PORTL;
+    motorZ.pinGrapStep = GRIP_STEPPER_STEP;
+
+    // motorZ.ddrLimit = &DDRA;
+    // motorZ.portLimit = &PORTA;
+    // motorZ.pinLimit = &PINA;
+    // motorZ.limit = PA0;
+    motorZ.ddrLimit = 0;
+    motorZ.portLimit = 0;
+    motorZ.pinLimit = 0;
+    motorZ.limit = 0;
 
     motorX.ddrA = &DDRL;
     motorX.portA = &PORTL;
@@ -481,32 +626,39 @@ int main(void)
     motorY.pinLimitB = &PINA;
     motorY.limitB = PA3;
 
-    changeOption(&projectOption, &optionSelector, lcdEncoderState);
-    uint8_t state = DCMOTOR_STOP;
+    dcmotor_init(motorX);
+    dcmotor_init(motorY);
+    stepmotor_init(motorZ);
+
+    changeOption(&projectOption, &optionSelector, lcdEncoderState, motorX, motorY);
 
     while (1)
     {
         readScreenEncoder(&lcdEncoderState);
-        if (lcdEncoderState == ENCODER_STATE_BUTTON)
-        {
-            dcmotor_instruction(motorX, DCMOTOR_FORWARD);
-            dcmotor_instruction(motorY, DCMOTOR_FORWARD);
-        }
-        else
-        {
-            dcmotor_instruction(motorX, DCMOTOR_BACKWARD);
-            dcmotor_instruction(motorY, DCMOTOR_BACKWARD);
-        }
 
-        continue;
-
-        if (validateLcdState(lcdEncoderState, lcdEncoderPrevState))
+        if (emergency)
         {
-            changeOption(&projectOption, &optionSelector, lcdEncoderState);
+            if (validateLcdState(lcdEncoderState, lcdEncoderPrevState) || !emergencyPrev)
+            {
+                emergencyPrev = 1;
+                initEmergency(motorX, motorY, motorZ);
+            }
+            if (lcdEncoderState == ENCODER_STATE_BUTTON && !(PINE & _BV(PE4)))
+            {
+                emergency = 0;
+            }
+            lcdEncoderPrevState = lcdEncoderState;
+            continue;
         }
 
-        moveMotors(motorX, motorY);
+        if (validateLcdState(lcdEncoderState, lcdEncoderPrevState) || emergencyPrev)
+        {
+            changeOption(&projectOption, &optionSelector, lcdEncoderState, motorX, motorY);
+        }
+
+        moveMotors(motorX, motorY, motorZ);
 
         lcdEncoderPrevState = lcdEncoderState;
+        emergencyPrev = 0;
     }
 }
